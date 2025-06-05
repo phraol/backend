@@ -1,223 +1,120 @@
 const http = require('http');
 const fs = require('fs');
-const path = require('path');
 const url = require('url');
 
+// File to store tasks
+const TASKS_FILE = 'tasks.json';
 
-const DATA_FILE = path.join(__dirname, 'tasks.json');
-
-
+// Load tasks from file, create file if it doesn’t exist
 function loadTasks() {
-  
-  if (!fs.existsSync(DATA_FILE)) {
-    fs.writeFileSync(DATA_FILE, JSON.stringify([]), 'utf8');
+  if (!fs.existsSync(TASKS_FILE)) {
+    fs.writeFileSync(TASKS_FILE, '[]');
   }
-
-
-  const rawData = fs.readFileSync(DATA_FILE, 'utf8');
-
-
   try {
-    return JSON.parse(rawData);
+    return JSON.parse(fs.readFileSync(TASKS_FILE));
   } catch (error) {
-    console.error('Could not parse tasks.json. Using empty list.', error);
+    console.error('Error parsing tasks.json:', error);
     return [];
   }
 }
 
-
-
+// Save tasks to file
 function saveTasks(tasks) {
-  
-  const jsonString = JSON.stringify(tasks, null, 2);
-  fs.writeFileSync(DATA_FILE, jsonString, 'utf8');
+  fs.writeFileSync(TASKS_FILE, JSON.stringify(tasks, null, 2));
 }
 
-// Helper function: getRequestBody(req)
-//    Reads the incoming request body (JSON) and returns it as an object.
-function getRequestBody(req) {
-  return new Promise((resolve, reject) => {
-    let bodyData = '';
-    
-    req.on('data', (chunk) => {
-      bodyData += chunk.toString();
-    });
+// Create the HTTP server
+const server = http.createServer((req, res) => {
+  const method = req.method;
+  const parsedUrl = url.parse(req.url, true);
+  const path = parsedUrl.pathname;
 
-   
+  // Set response headers
+  res.setHeader('Content-Type', 'application/json');
+
+  // GET /api/tasks: Return all tasks
+  if (method === 'GET' && path === '/api/tasks') {
+    const tasks = loadTasks();
+    res.writeHead(200);
+    res.end(JSON.stringify(tasks));
+  }
+
+  // POST /api/tasks: Add a new task
+  else if (method === 'POST' && path === '/api/tasks') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
     req.on('end', () => {
       try {
-      
-        const parsed = JSON.parse(bodyData || '{}');
-        resolve(parsed);
-      } catch (err) {
-       
-        reject(new Error('Invalid JSON'));
+        const newTask = JSON.parse(body);
+        if (!newTask.description || typeof newTask.description !== 'string') {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: 'Description is required' }));
+          return;
+        }
+        const tasks = loadTasks();
+        const newId = tasks.length > 0 ? Math.max(...tasks.map(t => t.id)) + 1 : 1;
+        const task = { id: newId, description: newTask.description, completed: false };
+        tasks.push(task);
+        saveTasks(tasks);
+        res.writeHead(201);
+        res.end(JSON.stringify(task));
+      } catch (error) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: 'Invalid JSON' }));
       }
     });
-
-    
-    req.on('error', (err) => reject(err));
-  });
-}
-
- // Create the HTTP server
-const server = http.createServer(async (req, res) => {
-  // Parse the URL and method
-  const parsedUrl = url.parse(req.url, true);
-  const method = req.method;
-  const pathname = parsedUrl.pathname;
-
-  
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-
-
-  if (method === 'OPTIONS') {
-    res.writeHead(204);
-    return res.end();
   }
 
-  //ROUTE: GET /api/tasks
-  if (method === 'GET' && pathname === '/api/tasks') {
-    // 1. Load all tasks from tasks.json
+  // PUT /api/tasks/:id: Mark task as completed
+  else if (method === 'PUT' && path.startsWith('/api/tasks/')) {
+    const id = parseInt(path.split('/')[3], 10);
+    if (isNaN(id)) {
+      res.writeHead(400);
+      res.end(JSON.stringify({ error: 'Invalid task ID' }));
+      return;
+    }
     const tasks = loadTasks();
-
-    // 2. Return JSON with HTTP 200 status
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify(tasks));
-  }
-
-  // ROUTE: POST /api/tasks 
-  if (method === 'POST' && pathname === '/api/tasks') {
-    try {
-      // 1. Read the JSON body, e.g. { "title": "go to class" }
-      const body = await getRequestBody(req);
-      const title = (body.title || '').toString().trim();
-
-      // 2. Simple validation: title must not be empty
-      if (!title) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: 'Task title is required.' }));
-      }
-
-      // 3. Load existing tasks
-      const tasks = loadTasks();
-
-      // 4. Decide the new task’s id: take max existing id + 1, or 1 if none exist
-      const newId = tasks.length > 0
-        ? Math.max(...tasks.map(t => t.id)) + 1
-        : 1;
-
-      // 5. Create the new task object
-      const newTask = {
-        id: newId,
-        title: title,
-        completed: false
-      };
-
-      //  Add to the array and save back into tasks.json
-      tasks.push(newTask);
-      saveTasks(tasks);
-
-      //  Send back the newly created task with HTTP 201 (Created)
-      res.writeHead(201, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify(newTask));
-    } catch (err) {
-      // If something goes wrong (e.g. invalid JSON), return 400
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ error: err.message }));
+    const taskIndex = tasks.findIndex(t => t.id === id);
+    if (taskIndex === -1) {
+      res.writeHead(404);
+      res.end(JSON.stringify({ error: 'Task not found' }));
+      return;
     }
-  }
-
-  // ROUTE: PUT /api/tasks/:id
-  // Example URL: PUT http://localhost:3000/api/tasks/2
-  if (method === 'PUT' && /^\/api\/tasks\/\d+$/.test(pathname)) {
-    try {
-      // 1. Extract the id from the URL
-      const idString = pathname.split('/').pop();
-      const id = parseInt(idString, 10);
-
-      // 2. Load existing tasks and find the one with this id
-      const tasks = loadTasks();
-      const index = tasks.findIndex(t => t.id === id);
-      if (index === -1) {
-        // If not found, return 404
-        res.writeHead(404, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: 'Task not found.' }));
-      }
-
-      // 3. Optionally allow a JSON body { "completed": true } to set completed.
-      //    If no body or no "completed" in body, we simply mark completed = true.
-      let completedValue = true;
-      if (req.headers['content-type'] === 'application/json') {
-        const body = await getRequestBody(req);
-        if (body.hasOwnProperty('completed') && typeof body.completed === 'boolean') {
-          completedValue = body.completed;
-        }
-      }
-
-      // 4. Update the task’s completed status
-      tasks[index].completed = completedValue;
-      saveTasks(tasks);
-
-      // 5. Return the updated task
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify(tasks[index]));
-    } catch (err) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ error: err.message }));
-    }
-  }
-
-  // ROUTE: DELETE /api/tasks/:id 
-  // Example URL: DELETE http://localhost:3000/api/tasks/2
-  if (method === 'DELETE' && /^\/api\/tasks\/\d+$/.test(pathname)) {
-    // 1. Extract the id from the URL
-    const idString = pathname.split('/').pop();
-    const id = parseInt(idString, 10);
-
-    // 2. Load existing tasks and find the one with this id
-    const tasks = loadTasks();
-    const index = tasks.findIndex(t => t.id === id);
-    if (index === -1) {
-      // If not found, return 404
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ error: 'Task not found.' }));
-    }
-
-    // 3. Remove that task from the array
-    const removedTask = tasks.splice(index, 1)[0];
+    tasks[taskIndex].completed = true;
     saveTasks(tasks);
-
-    // 4. Return the deleted task
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify(removedTask));
+    res.writeHead(200);
+    res.end(JSON.stringify(tasks[taskIndex]));
   }
 
-  // ROUTE: GET / 
-  if (method === 'GET' && pathname === '/') {
-    res.writeHead(200, { 'Content-Type': 'text/html' });
-    return res.end(`
-      <h1>Simple Task Manager API</h1>
-      <p>Use the following endpoints:</p>
-      <ul>
-        <li>GET /api/tasks</li>
-        <li>POST /api/tasks</li>
-        <li>PUT /api/tasks/&lt;id&gt;</li>
-        <li>DELETE /api/tasks/&lt;id&gt;</li>
-      </ul>
-    `);
+  // DELETE /api/tasks/:id: Delete a task
+  else if (method === 'DELETE' && path.startsWith('/api/tasks/')) {
+    const id = parseInt(path.split('/')[3], 10);
+    if (isNaN(id)) {
+      res.writeHead(400);
+      res.end(JSON.stringify({ error: 'Invalid task ID' }));
+      return;
+    }
+    const tasks = loadTasks();
+    const taskIndex = tasks.findIndex(t => t.id === id);
+    if (taskIndex === -1) {
+      res.writeHead(404);
+      res.end(JSON.stringify({ error: 'Task not found' }));
+      return;
+    }
+    tasks.splice(taskIndex, 1);
+    saveTasks(tasks);
+    res.writeHead(204);
+    res.end();
   }
 
-  // NO MATCH (404)
-  // If none of the above routes match, return 404 Not Found
-  res.writeHead(404, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({ error: 'Endpoint not found.' }));
+  // Handle unknown endpoints
+  else {
+    res.writeHead(404);
+    res.end(JSON.stringify({ error: 'Not found' }));
+  }
 });
 
-//  Start the server, listening on port 3000
-const PORT = 3000;
-server.listen(PORT, () => {
-  console.log(`Server is running at http://localhost:${PORT}`);
+// Start the server on port 3000
+server.listen(3000, () => {
+  console.log('Server running on port 3000');
 });
